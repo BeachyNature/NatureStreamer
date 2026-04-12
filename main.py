@@ -3,6 +3,7 @@ import cv2
 import time
 import socket
 import struct
+import keyboard
 import win32api
 import win32con
 import threading
@@ -23,8 +24,9 @@ class Displays:
     def change_view(self, index: int) -> None:
         """ Change the current display to the specified index """
 
-        if index >= len(mss.mss().monitors):
-            print(f"Invalid display index: {index}. Available displays: {len(mss.mss().monitors)-1}")
+        num_displays = self.get_total_display()
+        if index >= num_displays + 1:
+            print(f"Invalid display index: {index}. Available displays: {num_displays}")
             return
 
         #TODO: Send updated screen capture -----------
@@ -38,16 +40,20 @@ class Displays:
         width, height = self.monitor["width"], self.monitor["height"]
         pprint(f"Monitor Size: ({width}, {height})")
         return self.monitor["width"], self.monitor["height"]
+    
+    def get_total_display(self) -> int:
+        """ Get the total number of displays """
+
+        return len(mss.mss().monitors)
 
 def key_action(key_code:List[str]) -> None:
     """ Action on what keys are pressed on the client side """
 
     for code in key_code:
-        code = int(code.strip())
-
-        win32api.keybd_event(code, 0, 0, 0)  # Key down
-        time.sleep(0.05)  # Short delay to ensure the key press is registered
-        win32api.keybd_event(code, 0, win32con.KEYEVENTF_KEYUP, 0)  # Key up
+        code = code.strip()
+        keyboard.press(code)
+        time.sleep(0.005)
+        keyboard.release(code)
         print(f"Recieved key: {code}")
 
 def change_display(action_event, displays: Displays) -> None:
@@ -77,7 +83,7 @@ def click_event(action_event):
 
     win32api.SetCursorPos((x,y))
     win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN,x,y,0,0)
-    time.sleep(0.05)  # Short delay to ensure the click is registered
+    time.sleep(0.005)
     win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP,x,y,0,0)
 
 def key_event(action_event):
@@ -92,14 +98,15 @@ def key_event(action_event):
     key_press = key_press[1:]
     key_action(key_press)
 
-def send_handshake(tcp_connection: socket.socket, capture_w: int, capture_h: int) -> None:
+def send_handshake(tcp_connection: socket.socket, capture_w: int, capture_h: int, num_display: int) -> None:
     """Send screen dimensions once at the start"""
-    tcp_connection.sendall(struct.pack('>II', capture_w, capture_h))
-    pprint(f"Sent handshake: {capture_w}x{capture_h}")
 
+    tcp_connection.sendall(struct.pack('>III', capture_w, capture_h, num_display))
+    pprint(f"Sent handshake: {capture_w}x{capture_h} - Total Displays: {num_display}")
 
 def restart_stream(tcp_connection: socket.socket, displays: Displays) -> None:
     """Restart the streaming process after a client disconnects"""
+
     pprint("Client disconnected. Restarting stream...")
     with contextlib.suppress(Exception):
         tcp_connection.close()
@@ -111,15 +118,17 @@ def start_video(tcp_connection: socket.socket, displays: Displays) -> None:
     """Start the video streaming loop"""
     
     with mss.mss() as sct:
+        # Get information about the server -------
         capture_w, capture_h = displays.get_size()
-        send_handshake(tcp_connection, capture_w, capture_h)
+        num_displays = displays.get_total_display()
+        send_handshake(tcp_connection, capture_w, capture_h, num_displays)
 
         while True:
             display = sct.grab(displays.monitor)
             img = np.asarray(display)[:, :, :3]
             frame = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
 
-            encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 80]
+            encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 60]
             result, frame_bytes = cv2.imencode('.jpg', frame, encode_param)
             if not result:
                 pprint("Failed to encode frame. Skipping.")
