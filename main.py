@@ -48,7 +48,7 @@ def key_action(key_code:List[str]) -> None:
         win32api.keybd_event(code, 0, 0, 0)  # Key down
         time.sleep(0.05)  # Short delay to ensure the key press is registered
         win32api.keybd_event(code, 0, win32con.KEYEVENTF_KEYUP, 0)  # Key up
-        print(f"Recieved key press: {code}")
+        print(f"Recieved key: {code}")
 
 def change_display(action_event, displays: Displays) -> None:
     """ Action on display switch event from client """
