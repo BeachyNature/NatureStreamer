@@ -14,13 +14,11 @@ from PyQt6.QtWidgets import (
     QPushButton, QComboBox, QLineEdit, QVBoxLayout
 )
 
+# Local Imports
+from wrapper import pprint
+
 VALID_SCAN_CODES = set(range(1, 84))
 send_lock = threading.Lock()
-
-def pprint(msg:str) -> None:
-    """ Pretty print with timestamp """
-
-    print(f"[{time.strftime('%H:%M:%S')}] {msg}")
 
 def view_event(tcp_connection, display_num) -> None:
     """ Send the message to change to a specific view """
@@ -135,7 +133,7 @@ def recv_exact(sock: socket.socket, n: int) -> bytes:
             continue
     return data
 
-def display_video(tcp_connection: socket.socket) -> None:
+def display_video(tcp_connection: socket.socket, display) -> None:
     """Receive video frames from the server and display them."""
     try:
         first_frame = True
@@ -188,6 +186,7 @@ def display_video(tcp_connection: socket.socket) -> None:
 
             if first_frame: # Resize window to standarad
                 cv2.resizeWindow(VIDEO_WINDOW, 1920, 1080)
+                view_event(tcp_connection, display)
                 first_frame = False
 
             if cv2.waitKey(1) & 0xFF == 27:
@@ -242,9 +241,10 @@ class ConnectWindow(QWidget):
         self.port_input = QLineEdit("3000")
         self.port_input.setPlaceholderText("Port")
 
-        view = QLineEdit() # TODO: Change to combobox based on how many displays are avalaible 
-        view.setPlaceholderText("Enter Display Number (0 - All, 1 - Main, etc.)")
-        view.returnPressed.connect(self.change_view)
+        self.view = QLineEdit() # TODO: Change to combobox based on how many displays are avalaible 
+        self.view.setPlaceholderText("Enter Display Number (0 - All, 1 - Main, etc.)")
+        self.view.returnPressed.connect(self.change_view)
+        # self.view.setVisible(False)
 
         conn_btn = QPushButton("Connect to Stream Server")
         conn_btn.clicked.connect(self.connect)
@@ -257,7 +257,7 @@ class ConnectWindow(QWidget):
 
         vlay = QVBoxLayout()
         vlay.addLayout(hlay)
-        vlay.addWidget(view)
+        vlay.addWidget(self.view)
         vlay.addWidget(conn_btn)
         vlay.addWidget(self.info_lbl)
         self.setLayout(vlay)
@@ -288,12 +288,13 @@ class ConnectWindow(QWidget):
 
         # Start the video stream -----------
         self.info_lbl.setText(f"Connected to {host} ({ip_addr}). Starting stream...")
+        self.view.setVisible(True)
         QApplication.processEvents()
 
         # Run the video thread ----------
         stream_thread = threading.Thread(
             target=display_video,
-            args=(self.tcp_conn,),
+            args=(self.tcp_conn, self.view.text()),
         )
         stream_thread.start()
         stream_thread.join()
@@ -301,9 +302,10 @@ class ConnectWindow(QWidget):
         self.info_lbl.setText("Stream ended.")
         self.tcp_conn = None
 
-    def change_view(self, text) -> None:
+    def change_view(self) -> None:
         """ Request to change the view """
 
+        text = self.view.text()
         if not text:
             self.info_lbl.setText("Not a valid display...")
             return

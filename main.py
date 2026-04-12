@@ -10,35 +10,40 @@ import contextlib
 import numpy as np
 from typing import List
 
+# Local Imports
+from wrapper import pprint
+
 class Displays:
     """ Class to manage display information and operations """
 
     def __init__(self):
 
-        self.displays = mss.mss().monitors[1]
+        self.monitor = mss.mss().monitors[1]
 
     def change_view(self, display_index: int) -> None:
         """ Change the current display to the specified index """
 
-        if display_index < 1 or display_index >= len(mss.mss().monitors):
+        if display_index >= len(mss.mss().monitors):
             print(f"Invalid display index: {display_index}. Available displays: {len(mss.mss().monitors)-1}")
             return
 
-        self.displays = mss.mss().monitors[display_index]
-        print(f"Switched to display {display_index}: {self.displays}")
+        #TODO: Send updated screen capture -----------
+        self.monitor = mss.mss().monitors[display_index]
+        self.get_size()
+        print(f"Switched to display {display_index}: {self.monitor}")
 
-def pprint(msg:str) -> None:
-    """ Pretty print with timestamp """
+    def get_size(self) -> tuple:
+        """ Get the screen size of monitor (width, height)"""
 
-    print(f"[{time.strftime('%H:%M:%S')}] {msg}")
-
+        width, height = self.monitor["width"], self.monitor["height"]
+        pprint(f"Monitor Size: ({width}, {height})")
+        return self.monitor["width"], self.monitor["height"]
 
 def key_action(key_code:List[str]) -> None:
     """ Action on what keys are pressed on the client side """
 
     for code in key_code:
         code = int(code.strip())
-        
 
         # win32api.keybd_event(code, 0, 0, 0)  # Key down
         # time.sleep(0.05)  # Short delay to ensure the key press is registered
@@ -106,12 +111,11 @@ def start_video(tcp_connection: socket.socket, displays: Displays) -> None:
     """Start the video streaming loop"""
     
     with mss.mss() as sct:
-        monitor = sct.monitors[1]
-        capture_w, capture_h = monitor["width"], monitor["height"]
+        capture_w, capture_h = displays.get_size()
         send_handshake(tcp_connection, capture_w, capture_h)
 
         while True:
-            display = sct.grab(monitor)
+            display = sct.grab(displays.monitor)
             img = np.asarray(display)[:, :, :3]
             frame = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
 
