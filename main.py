@@ -20,17 +20,17 @@ class Displays:
 
         self.monitor = mss.mss().monitors[1]
 
-    def change_view(self, display_index: int) -> None:
+    def change_view(self, index: int) -> None:
         """ Change the current display to the specified index """
 
-        if display_index >= len(mss.mss().monitors):
-            print(f"Invalid display index: {display_index}. Available displays: {len(mss.mss().monitors)-1}")
+        if index >= len(mss.mss().monitors):
+            print(f"Invalid display index: {index}. Available displays: {len(mss.mss().monitors)-1}")
             return
 
         #TODO: Send updated screen capture -----------
-        self.monitor = mss.mss().monitors[display_index]
+        self.monitor = mss.mss().monitors[index]
         self.get_size()
-        print(f"Switched to display {display_index}: {self.monitor}")
+        print(f"Switched to display {index}: {self.monitor}")
 
     def get_size(self) -> tuple:
         """ Get the screen size of monitor (width, height)"""
@@ -45,10 +45,10 @@ def key_action(key_code:List[str]) -> None:
     for code in key_code:
         code = int(code.strip())
 
-        # win32api.keybd_event(code, 0, 0, 0)  # Key down
-        # time.sleep(0.05)  # Short delay to ensure the key press is registered
-        # win32api.keybd_event(code, 0, win32con.KEYEVENTF_KEYUP, 0)  # Key up
-        print(f"Simulated key press: {code}")
+        win32api.keybd_event(code, 0, 0, 0)  # Key down
+        time.sleep(0.05)  # Short delay to ensure the key press is registered
+        win32api.keybd_event(code, 0, win32con.KEYEVENTF_KEYUP, 0)  # Key up
+        print(f"Recieved key press: {code}")
 
 def change_display(action_event, displays: Displays) -> None:
     """ Action on display switch event from client """
@@ -75,10 +75,10 @@ def click_event(action_event):
     x, y = int(x_str), int(y_str)
     pprint(f"Received click: ({x},{y})")
 
-    # win32api.SetCursorPos((x,y))
-    # win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN,x,y,0,0)
-    # time.sleep(0.05)  # Short delay to ensure the click is registered
-    # win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP,x,y,0,0)
+    win32api.SetCursorPos((x,y))
+    win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN,x,y,0,0)
+    time.sleep(0.05)  # Short delay to ensure the click is registered
+    win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP,x,y,0,0)
 
 def key_event(action_event):
     """ Action on what keys are pressed on the client side """
