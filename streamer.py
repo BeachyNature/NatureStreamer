@@ -6,8 +6,8 @@ import struct
 import socket
 import threading
 import numpy as np
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QPixmap, QImage
+from PyQt6.QtCore import Qt, QObject
+from PyQt6.QtGui import QPixmap, QImage, QKeyEvent
 from PyQt6.QtWidgets import (
     QApplication, QHBoxLayout, QMainWindow, QPushButton, QWidget, QLabel, 
     QPushButton, QComboBox, QLineEdit, QVBoxLayout, QSizePolicy
@@ -17,8 +17,19 @@ from PyQt6.QtWidgets import (
 from __version__ import version
 from wrapper import pprint, read_yaml
 
-VALID_SCAN_CODES = set(range(1, 84))
 send_lock = threading.Lock()
+KEY_MAP = {
+    Qt.Key.Key_Space: "space",
+    Qt.Key.Key_Return: "return",
+    Qt.Key.Key_Enter: "enter",
+    Qt.Key.Key_Escape: "escape",
+    Qt.Key.Key_Tab: "tab",
+    Qt.Key.Key_Backspace: "backspace",
+    Qt.Key.Key_Left: "left",
+    Qt.Key.Key_Right: "right",
+    Qt.Key.Key_Up: "up",
+    Qt.Key.Key_Down: "down",
+}
 
 def fit_rect(src_w, src_h, dst_w, dst_h):
     """ Calculate the largest centered rectangle of aspect ratio that fits within the destination """
@@ -76,6 +87,7 @@ class VideoLabel(QLabel):
         self.running = False
         self.control_conn  = None
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setScaledContents(False)
 
     def set_frame(self, pixmap: QPixmap) -> None:
@@ -147,6 +159,17 @@ class VideoLabel(QLabel):
             pprint("Failed to send click — connection lost.")
         super().mousePressEvent(event)
 
+# class KeyFilter(QObject):
+#     def eventFilter(self, obj, event):
+#         from PyQt6.QtCore import QEvent
+#         if event.type() in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease) and event.key() == Qt.Key.Key_Space:
+#             fw = QApplication.focusWidget()
+#             # treat both QLabel and VideoLabel (subclass of QLabel) as label-like
+#             if isinstance(fw, QLabel):
+#                 return True  # eat Space when a QLabel has focus
+#         return super().eventFilter(obj, event)
+
+
 class StreamerApp(QMainWindow):
     """ Initial Window to connect to the server and select the display to stream """
 
@@ -157,7 +180,6 @@ class StreamerApp(QMainWindow):
         super(StreamerApp, self).__init__()
 
         # Get the addresses --------
-        self._pressed_keys = set()
         self.socket_dict = socket_dict
         self.init_ui()
     
@@ -184,6 +206,7 @@ class StreamerApp(QMainWindow):
 
         self.conn_btn = QPushButton("Connect")
         self.conn_btn.clicked.connect(self.connect)
+        self.conn_btn.setAutoDefault(False)
 
         self.info_lbl = QLabel("Not Connected.")
         self.stream_lbl = VideoLabel("Click Connect to View Stream")
@@ -399,29 +422,26 @@ class StreamerApp(QMainWindow):
         return super().closeEvent(a0)
 
     def keyPressEvent(self, event) -> None:
+        """ Get the keyboard events to send over network """
+
         if event.isAutoRepeat():
+            pprint("Sticky keys detected! Canceling action.")
             return
 
         key = event.key()
-        if key in self._pressed_keys:  # Already down, skip
-            return
+        text = KEY_MAP.get(key)
+        if not text:
+            text = event.text()
 
-        self._pressed_keys.add(key)
-        text = event.text()
+        # Send the key input to server ----------
         if text and self.stream_lbl.control_conn:
             self.stream_lbl.key_press(text)
-
         super().keyPressEvent(event)
-
-    def keyReleaseEvent(self, event) -> None:
-        if event.isAutoRepeat():
-            return
-
-        self._pressed_keys.discard(event.key())  # Mark key as released
-        super().keyReleaseEvent(event)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+
+    # Get the address yaml file -----------
     curr_dir = os.getcwd()
     addr_pth = os.path.join(curr_dir, "address.yaml")
     socket_dict = read_yaml(addr_pth)

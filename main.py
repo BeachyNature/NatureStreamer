@@ -24,7 +24,7 @@ MOUSEEVENTF_VIRTUALDESK = 0x4000
 # Setup pynput config -------
 _keyboard = Controller()
 SPECIAL_KEYS = {
-    'enter':     Key.enter,
+    'return':     Key.enter,
     'backspace': Key.backspace,
     'tab':       Key.tab,
     'esc':       Key.esc,
