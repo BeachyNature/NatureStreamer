@@ -1,5 +1,5 @@
 mss==10.1.0
 pywin32==311
 pyqt6==6.11.0
-keyboard==0.13.5
+pynput==1.8.1
 opencv_python==4.13.0.92
