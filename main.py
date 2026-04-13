@@ -27,7 +27,7 @@ SPECIAL_KEYS = {
     'return':     Key.enter,
     'backspace': Key.backspace,
     'tab':       Key.tab,
-    'esc':       Key.esc,
+    'escape':    Key.esc,
     'space':     Key.space,
     'left':      Key.left,
     'right':     Key.right,
@@ -99,13 +99,7 @@ def key_action(key_queue:queue.Queue) -> None:
         try:
             # Check if it's a special key first
             code = key_queue.get()
-            key = SPECIAL_KEYS.get(code.lower())
-            if key:
-                _keyboard.press(key)
-                _keyboard.release(key)
-            else:
-                # Regular character — tap is atomic press + release
-                _keyboard.tap(code)
+            _keyboard.tap(code)
             print(f"Received key: {code}")
         except Exception as e:
             print(f"Failed to send key {code}: {e}")
@@ -121,6 +115,8 @@ def key_event(action_event):
     # Run through each key press action --------
     key_queue = queue.Queue()
     for k in key_press[1:]:
+        special = SPECIAL_KEYS.get(k.lower())
+        if special: k = special
         key_queue.put(k.strip(), block=True)
     key_action(key_queue)
 
@@ -167,7 +163,6 @@ def click_event(action_event, displays: Displays) -> None:
     ctypes.windll.user32.SendInput(3, (INPUT * 3)(move, down, up), ctypes.sizeof(INPUT))
     pprint(f"Click ({x},{y}) -> abs ({abs_x},{abs_y}) -> norm ({norm_x},{norm_y})")
 
-
 def send_handshake(tcp_connection: socket.socket, capture_w: int, capture_h: int, num_display: int) -> None:
     """Send screen dimensions once at the start"""
 
@@ -181,7 +176,7 @@ def restart_stream(video_conn: socket.socket, control_conn: socket.socket,  disp
     with contextlib.suppress(Exception):
         video_conn.close()
         control_conn.close()
-    time.sleep(1) # Give enough time to release port -----
+    time.sleep(1)
     start_stream(displays)
 
 def control_handler(control_conn: socket.socket, displays: Displays) -> None:
@@ -255,7 +250,7 @@ def create_tcp_server(host:str='0.0.0.0', name="", port:int=3000) -> socket.sock
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server_socket.bind((host, port))
     server_socket.listen()
-    pprint(f"TCP {name} server created and listening on {host}:{port}")
+    pprint(f"TCP {name} server created and listening on {port}")
     return server_socket
 
 def start_stream(displays: Displays, timeout=True) -> int:
