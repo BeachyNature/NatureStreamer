@@ -115,9 +115,11 @@ def key_event(action_event):
     # Run through each key press action --------
     key_queue = queue.Queue()
     for k in key_press[1:]:
+        key = k.lower().stip()
         special = SPECIAL_KEYS.get(k.lower())
-        if special: k = special
-        key_queue.put(k.strip(), block=True)
+        if special: 
+            key = special
+        key_queue.put(key, block=True)
     key_action(key_queue)
 
 def display_event(action_event, displays: Displays, control_conn:socket.socket) -> None:
