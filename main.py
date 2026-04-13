@@ -115,7 +115,7 @@ def key_event(action_event):
     # Run through each key press action --------
     key_queue = queue.Queue()
     for k in key_press[1:]:
-        key = k.lower().stip()
+        key = k.lower().strip()
         special = SPECIAL_KEYS.get(k.lower())
         if special: 
             key = special
