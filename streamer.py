@@ -6,8 +6,8 @@ import struct
 import socket
 import threading
 import numpy as np
-from PyQt6.QtCore import Qt, QObject
-from PyQt6.QtGui import QPixmap, QImage, QKeyEvent
+from PyQt6.QtGui import QPixmap, QImage
+from PyQt6.QtCore import Qt, QEvent, QObject, QPointF, pyqtSignal, pyqtSlot
 from PyQt6.QtWidgets import (
     QApplication, QHBoxLayout, QMainWindow, QPushButton, QWidget, QLabel, 
     QPushButton, QComboBox, QLineEdit, QVBoxLayout, QSizePolicy
@@ -44,7 +44,7 @@ def fit_rect(src_w, src_h, dst_w, dst_h):
     x = (dst_w - w) // 2; y = (dst_h - h) // 2
     return x, y, w, h
 
-def connect_to_server(host: str, port: int, retries: int = 5, delay: float = 1.0) -> socket.socket:
+def connect_to_server(host: str, port: int, retries:int=5, delay:float=0.1) -> socket.socket:
     """Establish a TCP connection to the server, with retries."""
 
     for attempt in range(retries):
@@ -61,20 +61,61 @@ def connect_to_server(host: str, port: int, retries: int = 5, delay: float = 1.0
     error = f"Could not connect to {host}:{port} after {retries} attempts."
     raise ConnectionRefusedError(error)
 
-def recv_exact(sock: socket.socket, n: int) -> bytes:
-    """Read exactly n bytes from the socket, or raise if connection closes."""
 
-    data = b''
-    while len(data) < n:
-        try:
-            packet = sock.recv(n - len(data))
-            if not packet:
-                raise ConnectionError("Connection closed before all bytes were received.")
-            data += packet
-        except (BlockingIOError, socket.timeout):
-            continue
-    return data
+class MouseTracker(QObject):
 
+    actionCalled = pyqtSignal(str, str, QPointF)
+
+    def __init__(self, widget):
+        super(MouseTracker, self).__init__(widget)
+
+        self.last_action = None
+        self.last_button = None
+
+        # Avaliable Mouse Actions --------
+        self.mouse_actions = {
+            QEvent.Type.MouseMove: "move",
+            QEvent.Type.MouseButtonPress: "click",
+            QEvent.Type.MouseButtonRelease: "release",
+            QEvent.Type.Leave: "leave",
+        }
+        self.mouse_buttons = {
+            Qt.MouseButton.LeftButton: "left",
+            Qt.MouseButton.RightButton: "right",
+        }
+
+        # Setup the video label ------
+        self.widget = widget
+        self.widget.setMouseTracking(True)
+        self.widget.installEventFilter(self)
+
+    def eventFilter(self, o, e):
+        if not self.widget.running:
+            return super().eventFilter(o, e)
+
+        atype = self.mouse_actions.get(e.type())
+        if not atype:
+            return super().eventFilter(o, e)
+
+        if atype in ["leave", "release"]:
+            if self.last_button:
+                self.actionCalled.emit("release", self.last_button, QPointF())
+                self.last_button = None
+            return super().eventFilter(o, e)
+
+        if atype == "move":
+            if self.last_action == "click":
+                self.actionCalled.emit("click", self.last_button, e.position())
+            return super().eventFilter(o, e)
+
+        btype = self.mouse_buttons.get(e.button())
+        if not btype:
+            return super().eventFilter(o, e)
+
+        self.last_action = atype
+        self.last_button = btype
+        self.actionCalled.emit(atype, btype, e.position())
+        return super().eventFilter(o, e)
 
 class VideoLabel(QLabel):
     """QLabel that maps clicks back to capture coordinates and sends them to the server."""
@@ -86,6 +127,7 @@ class VideoLabel(QLabel):
         self.capture_h = 1
         self.running = False
         self.control_conn  = None
+
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setScaledContents(False)
@@ -105,18 +147,17 @@ class VideoLabel(QLabel):
         """ Send key press event to the server """
 
         msg = f"key:{key}\n"
-        time.sleep(0.005)
+        self.send_instruct(msg)
 
-        # Send the key press event to the server
-        with send_lock:
-            self.control_conn.sendall(msg.encode('utf-8'))
-            pprint(f"Sent key press: {key}")
-
-    def mousePressEvent(self, event) -> None:
+    @pyqtSlot(str, str, QPointF)
+    def send_action(self, atype:str, btype:str, coords:QPointF=None) -> None:
         """ Actions on how to handle mouse clicks """
 
-        if event.button() != Qt.MouseButton.LeftButton or not self.running:
-            return super().mousePressEvent(event)
+        # Do not have to send position on release
+        if atype == "release":
+            msg = f"mouse:{atype}:{btype}\n"
+            self.send_instruct(msg)
+            return
 
         lbl_w = self.width()
         lbl_h = self.height()
@@ -136,39 +177,31 @@ class VideoLabel(QLabel):
 
         offset_x = (lbl_w - px_w) // 2
         offset_y = (lbl_h - px_h) // 2
+        click_x = coords.x()
+        click_y = coords.y()
 
-        click_x = event.position().x()
-        click_y = event.position().y()
-
-        pprint(f"Label: ({lbl_w}x{lbl_h}) | Pixmap: ({px_w}x{px_h}) | Offset: ({offset_x},{offset_y}) | Click: ({click_x},{click_y})")
+        # Check if the click is valid or not
         if not (offset_x <= click_x < offset_x + px_w and
                 offset_y <= click_y < offset_y + px_h):
-            pprint("Clicked outside image area")
-            return super().mousePressEvent(event)
+            return
 
         rel_x    = (click_x - offset_x) / px_w
         rel_y    = (click_y - offset_y) / px_h
         screen_x = int(rel_x * self.capture_w)
         screen_y = int(rel_y * self.capture_h)
 
-        try: # Send the clicked location ----------
-            msg = f"click:{screen_x},{screen_y}\n"
+        # Send the clicked location ----------
+        msg = f"mouse:{atype}:{btype}:{screen_x},{screen_y}\n"
+        self.send_instruct(msg)
+
+    def send_instruct(self, msg) -> None:
+        """ Send instructions over the network """
+
+        try:
             with send_lock:
                 self.control_conn.sendall(msg.encode('utf-8'))
         except (BrokenPipeError, ConnectionResetError):
-            pprint("Failed to send click — connection lost.")
-        super().mousePressEvent(event)
-
-# class KeyFilter(QObject):
-#     def eventFilter(self, obj, event):
-#         from PyQt6.QtCore import QEvent
-#         if event.type() in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease) and event.key() == Qt.Key.Key_Space:
-#             fw = QApplication.focusWidget()
-#             # treat both QLabel and VideoLabel (subclass of QLabel) as label-like
-#             if isinstance(fw, QLabel):
-#                 return True  # eat Space when a QLabel has focus
-#         return super().eventFilter(obj, event)
-
+            pprint("Failed to send action — connection lost.")
 
 class StreamerApp(QMainWindow):
     """ Initial Window to connect to the server and select the display to stream """
@@ -201,7 +234,7 @@ class StreamerApp(QMainWindow):
 
         # TODO: Change to combobox based on how many displays are avalaible
         self.view_combo = QComboBox()
-        self.view_combo.currentIndexChanged.connect(self.view_event)
+        self.view_combo.activated.connect(self.view_event)
         self.view_combo.setFixedWidth(250)
 
         self.conn_btn = QPushButton("Connect")
@@ -215,6 +248,10 @@ class StreamerApp(QMainWindow):
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Expanding
         )
+
+        # Setup the mouse tracker ------------
+        tracker = MouseTracker(self.stream_lbl)
+        tracker.actionCalled.connect(self.stream_lbl.send_action)
 
         hlay = QHBoxLayout()
         hlay.addWidget(self.ip_combo)
@@ -245,15 +282,12 @@ class StreamerApp(QMainWindow):
             pprint("No active streams avaliable.")
             return
 
-        self.view_combo.clear()
-        self.info_lbl.setText("Stream ended.")
-        self.stream_lbl.setText("Click Connect To View")
-        self.conn_btn.setText("Connect")
         self.stream_lbl.running = False
-        
-        # Close TCP Connections
         self.video_conn.close()
         self.control_conn.close()
+        self.conn_btn.setText("Connect")
+        self.info_lbl.setText("Stream ended.")
+        self.stream_lbl.setText("Click Connect To View")
 
     def connect(self):
         """ Connect to the server and start the video stream """
@@ -263,7 +297,6 @@ class StreamerApp(QMainWindow):
 
             pprint("Closing connection!")
             self.disconnect()
-            self.stream_lbl.running = False
             return
     
         # Attempt tp connect to server using the selected IP address
@@ -327,6 +360,20 @@ class StreamerApp(QMainWindow):
                 pprint("Lost connection... Exiting stream.")
                 break
 
+    def recv_exact(self,  n: int) -> bytes:
+        """Read exactly n bytes from the socket, or raise if connection closes."""
+
+        data = b''
+        while len(data) < n:
+            try:
+                packet = self.video_conn.recv(n - len(data))
+                if not packet:
+                    raise ConnectionError("Connection closed before all bytes were received.")
+                data += packet
+            except (BlockingIOError, socket.timeout):
+                continue
+        return data
+
     def handle_control(self, msg: str) -> None:
         """Handle a single control message."""
 
@@ -354,9 +401,7 @@ class StreamerApp(QMainWindow):
 
         try:
             # Read handshake once before the loop
-            capture_w = struct.unpack('>I', recv_exact(self.video_conn, 4))[0]
-            capture_h = struct.unpack('>I', recv_exact(self.video_conn, 4))[0]
-            num_displays = struct.unpack('>I', recv_exact(self.video_conn, 4))[0]
+            capture_w, capture_h, num_displays = struct.unpack('>III', self.recv_exact(12))
 
             # Store values about display --------------------
             views = [f"View {i}" for i in range(num_displays)]
@@ -368,17 +413,13 @@ class StreamerApp(QMainWindow):
             self.stream_lbl.capture_h = capture_h
 
             # Enable key functions ---------------
-            # kb_hook = keyboard.on_release(lambda e: key_press(e.scan_code, param=self.control_conn))
             pprint(f"Server screen dimensions: ({capture_w}x{capture_h}) Total Displays: {num_displays}")
-
             while self.stream_lbl.running:
                 if not self.stream_lbl.running:
                     pprint("Closing Video Stream...")
                     break
         
-                raw_size = recv_exact(self.video_conn, 4)
-                frame_size = struct.unpack('>I', raw_size)[0]
-
+                frame_size = struct.unpack('>I', self.recv_exact(4))[0]
                 if frame_size == 0:
                     pprint("Received zero-length frame. Skipping.")
                     continue
@@ -387,7 +428,7 @@ class StreamerApp(QMainWindow):
                     pprint(f"Implausible frame size: {frame_size} bytes. Closing.")
                     break
 
-                frame_data = recv_exact(self.video_conn, frame_size)
+                frame_data = self.recv_exact(frame_size)
                 frame_array = np.frombuffer(frame_data, dtype=np.uint8)
                 frame = cv2.imdecode(frame_array, cv2.IMREAD_COLOR)
 
@@ -411,9 +452,6 @@ class StreamerApp(QMainWindow):
             self.info_lbl.setText(f"Connection error: {e}")
         except struct.error as e:
             self.info_lbl.setText(f"Failed to unpack frame size: {e}")
-        finally:
-            # keyboard.unhook(kb_hook)
-            self.disconnect()
 
     def closeEvent(self, a0):
         """ Action to do before closing """

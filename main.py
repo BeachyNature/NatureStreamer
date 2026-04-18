@@ -4,25 +4,23 @@ import time
 import queue
 import socket
 import struct
-import ctypes
 import threading
 import contextlib
 import numpy as np
-from typing import List
-from pynput.keyboard import Controller, Key
+from pynput.keyboard import Controller as KeyControl, Key
+from pynput.mouse import Controller as MouseControl, Button
 
 # Local Imports
 from wrapper import pprint
 
-# DEFINE CONSTANTS -------------
-MOUSEEVENTF_MOVE        = 0x0001
-MOUSEEVENTF_LEFTDOWN    = 0x0002
-MOUSEEVENTF_LEFTUP      = 0x0004
-MOUSEEVENTF_ABSOLUTE    = 0x8000
-MOUSEEVENTF_VIRTUALDESK = 0x4000
-
 # Setup pynput config -------
-_keyboard = Controller()
+_keyboard = KeyControl()
+_mouse = MouseControl()
+
+MOUSE_BUTTONS = {
+    "left": Button.left,
+    "right": Button.right
+}
 SPECIAL_KEYS = {
     'return':     Key.enter,
     'backspace': Key.backspace,
@@ -48,18 +46,16 @@ SPECIAL_KEYS = {
     'f5':        Key.f5,
 }
 
-class MOUSEINPUT(ctypes.Structure):
-    _fields_ = [
-        ("dx",          ctypes.c_long),
-        ("dy",          ctypes.c_long),
-        ("mouseData",   ctypes.c_ulong),
-        ("dwFlags",     ctypes.c_ulong),
-        ("time",        ctypes.c_ulong),
-        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
-    ]
+class Actions:
+    """ Store the actions given to easily track """
 
-class INPUT(ctypes.Structure):
-    _fields_ = [("type", ctypes.c_ulong), ("mi", MOUSEINPUT)]
+    def __init__(self):
+        
+        self.ntype = None
+        self.atype = None
+        self.btype = None
+        self.coords = None
+
 
 class Displays:
     """ Class to manage display information and operations """
@@ -139,31 +135,37 @@ def display_event(action_event, displays: Displays, control_conn:socket.socket) 
     control_conn.sendall(msg.encode('utf-8'))
     pprint(f"Sent new resolution: {w}x{h}")
 
-def click_event(action_event, displays: Displays) -> None:
+def click_event(events, displays: Displays) -> None:
     """ Create the offset to apply to the select display based on what is sent """
 
-    _, coords = action_event.split("click:")
-    x_str, y_str = coords.strip().split(",")
+    act = Actions()
+    instruct = events.split(":")
+    for idx, item in enumerate(act.__dict__):
+        if idx > len(instruct)-1:
+            break
+
+        event = instruct[idx]
+        setattr(act, item, event)
+
+    _button = MOUSE_BUTTONS.get(act.btype)
+    if not _button:
+        print(f"Invalid button type: {act.btype}")
+        return
+
+    if act.atype == "release":
+        _mouse.release(_button)
+        return
+
+    x_str, y_str = act.coords.strip().split(",")
     x, y = int(x_str), int(y_str)
 
     abs_x = displays.monitor["left"] + x
     abs_y = displays.monitor["top"]  + y
 
-    virt_x = ctypes.windll.user32.GetSystemMetrics(76)
-    virt_y = ctypes.windll.user32.GetSystemMetrics(77)
-    virt_w = ctypes.windll.user32.GetSystemMetrics(78)
-    virt_h = ctypes.windll.user32.GetSystemMetrics(79)
-
-    norm_x = int((abs_x - virt_x) * 65535 / virt_w)
-    norm_y = int((abs_y - virt_y) * 65535 / virt_h)
-
-    flags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK
-
-    move = INPUT(type=0, mi=MOUSEINPUT(dx=norm_x, dy=norm_y, mouseData=0, dwFlags=flags, time=0, dwExtraInfo=None))
-    down = INPUT(type=0, mi=MOUSEINPUT(dx=norm_x, dy=norm_y, mouseData=0, dwFlags=flags | MOUSEEVENTF_LEFTDOWN, time=0, dwExtraInfo=None))
-    up   = INPUT(type=0, mi=MOUSEINPUT(dx=norm_x, dy=norm_y, mouseData=0, dwFlags=flags | MOUSEEVENTF_LEFTUP,   time=0, dwExtraInfo=None))
-    ctypes.windll.user32.SendInput(3, (INPUT * 3)(move, down, up), ctypes.sizeof(INPUT))
-    pprint(f"Click ({x},{y}) -> abs ({abs_x},{abs_y}) -> norm ({norm_x},{norm_y})")
+    if act.atype == "click":
+        _mouse.position = (abs_x, abs_y)
+        _mouse.press(_button)
+    pprint(f"Action: ({x},{y}) -> abs ({abs_x},{abs_y})")
 
 def send_handshake(tcp_connection: socket.socket, capture_w: int, capture_h: int, num_display: int) -> None:
     """Send screen dimensions once at the start"""
@@ -187,7 +189,7 @@ def control_handler(control_conn: socket.socket, displays: Displays) -> None:
     buffer = ""
     while True:
         try:
-            control_conn.settimeout(1.0)
+            control_conn.settimeout(1)
             chunk = control_conn.recv(1024).decode('utf-8')
             if not chunk:
                 break
@@ -202,10 +204,11 @@ def control_handler(control_conn: socket.socket, displays: Displays) -> None:
                 # Event Actions --------------
                 if msg.startswith("key:"):
                     key_event(msg)
-                elif msg.startswith("click:"):
+                elif msg.startswith("mouse:"):
                     click_event(msg, displays)
                 elif msg.startswith("view:"):
                     display_event(msg, displays, control_conn)
+
         except socket.timeout:
             continue
         except (BrokenPipeError, ConnectionResetError, OSError):
