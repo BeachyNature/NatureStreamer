@@ -6,16 +6,39 @@ import struct
 import socket
 import threading
 import numpy as np
-from PyQt6.QtGui import QPixmap, QImage
 from PyQt6.QtCore import Qt, QEvent, QObject, QPointF, pyqtSignal, pyqtSlot
+from PyQt6.QtGui import QPixmap, QImage, QAction
 from PyQt6.QtWidgets import (
-    QApplication, QHBoxLayout, QMainWindow, QPushButton, QWidget, QLabel, 
-    QPushButton, QComboBox, QLineEdit, QVBoxLayout, QSizePolicy
+    QApplication,
+    QMainWindow,
+    QHBoxLayout,
+    QPushButton,
+    QComboBox,
+    QVBoxLayout,
+    QSizePolicy,
+    QLineEdit,
+    QWidget,
+    QLabel,
 )
+
+# Logging Setup -----
+import yaml
+import logging
+import logging.config
+
+# Load the YAML configuration
+with open('logger.yaml', 'r') as file:
+    config = yaml.safe_load(file)
+logging.config.dictConfig(config)
+
+# Create a logger
+logger = logging.getLogger('streamer')
+logger.debug('This is a debug message')
+logger.info('This is an info message')
 
 # Local Imports
 from __version__ import version
-from wrapper import pprint, read_yaml
+from common_utils.wrapper import pprint, read_yaml
 
 send_lock = threading.Lock()
 KEY_MAP = {
@@ -74,9 +97,9 @@ class MouseTracker(QObject):
 
         # Avaliable Mouse Actions --------
         self.mouse_actions = {
-            QEvent.Type.MouseMove: "move",
             QEvent.Type.MouseButtonPress: "click",
             QEvent.Type.MouseButtonRelease: "release",
+            QEvent.Type.Wheel: "wheel",
             QEvent.Type.Leave: "leave",
         }
         self.mouse_buttons = {
@@ -97,24 +120,20 @@ class MouseTracker(QObject):
         if not atype:
             return super().eventFilter(o, e)
 
-        if atype in ["leave", "release"]:
+        if atype == "leave":
             if self.last_button:
-                self.actionCalled.emit("release", self.last_button, QPointF())
-                self.last_button = None
-            return super().eventFilter(o, e)
-
-        if atype == "move":
-            if self.last_action == "click":
-                self.actionCalled.emit("click", self.last_button, e.position())
+                self.actionCalled.emit("leave", self.last_button, QPointF())
             return super().eventFilter(o, e)
 
         btype = self.mouse_buttons.get(e.button())
         if not btype:
             return super().eventFilter(o, e)
+        self.actionCalled.emit(atype, btype, e.position())
 
+        # Store last known values ------
         self.last_action = atype
         self.last_button = btype
-        self.actionCalled.emit(atype, btype, e.position())
+        self.last_loc = e.position()
         return super().eventFilter(o, e)
 
 class VideoLabel(QLabel):
@@ -150,11 +169,11 @@ class VideoLabel(QLabel):
         self.send_instruct(msg)
 
     @pyqtSlot(str, str, QPointF)
-    def send_action(self, atype:str, btype:str, coords:QPointF=None) -> None:
+    def send_action(self, atype:str, btype:str, coords:QPointF) -> None:
         """ Actions on how to handle mouse clicks """
 
         # Do not have to send position on release
-        if atype == "release":
+        if atype == "leave":
             msg = f"mouse:{atype}:{btype}\n"
             self.send_instruct(msg)
             return
@@ -223,16 +242,16 @@ class StreamerApp(QMainWindow):
         central_widget.setContentsMargins(0, 0, 0, 0)
         self.setCentralWidget(central_widget)
 
+        self.create_menu()
+        self.port_input = QLineEdit("3000")
+        self.port_input.setPlaceholderText("Port")
+        self.port_input.setFixedWidth(100)
+
         hosts = list(self.socket_dict.keys())
         self.ip_combo = QComboBox()
         self.ip_combo.addItems(hosts)
         self.ip_combo.setFixedWidth(250)
 
-        self.port_input = QLineEdit("3000")
-        self.port_input.setPlaceholderText("Port")
-        self.port_input.setFixedWidth(100)
-
-        # TODO: Change to combobox based on how many displays are avalaible
         self.view_combo = QComboBox()
         self.view_combo.activated.connect(self.view_event)
         self.view_combo.setFixedWidth(250)
@@ -272,17 +291,43 @@ class StreamerApp(QMainWindow):
         mlay.addWidget(self.stream_lbl, stretch=1)
         mlay.addWidget(self.conn_btn)
         self.centralWidget().setLayout(mlay)
-        self.resize(1920, 1080)
         self.setWindowTitle(f"Nature Station v{version}")
+        self.resize(1920, 1080)
+
+    def create_menu(self) -> None:
+        """ Extented Menu Options """
+
+        settings = QAction("Settings", self)
+        key_binds = QAction("Key Binds", self)
+        settings.triggered.connect(self.launch_settings)
+        key_binds.triggered.connect(self.launch_binds)
+        
+        menu = self.menuBar()
+        file_menu = menu.addMenu("&File")
+        file_menu.addAction(settings)
+        file_menu.addAction(key_binds)
+
+    def launch_settings(self) -> None:
+        """ Display the settings window """
+
+        # TODO: Build the settings window to add new sockets
+        pprint("Launch the settings window")
+
+    def launch_binds(self) -> None:
+        """ Display the keybinds window """
+
+        # TODO: Build the keybinds window to set custom keybinds
+        pprint("Launch the keybinds window")
 
     def disconnect(self):
-        """ Stop the stream """
+        """ Operations to complete at disconnect of stream """
 
         if not self.stream_lbl.running:
             pprint("No active streams avaliable.")
             return
 
         self.stream_lbl.running = False
+        self.view_combo.clear()
         self.video_conn.close()
         self.control_conn.close()
         self.conn_btn.setText("Connect")
@@ -293,8 +338,6 @@ class StreamerApp(QMainWindow):
         """ Connect to the server and start the video stream """
 
         if self.stream_lbl.running:
-            """ Close the connection """
-
             pprint("Closing connection!")
             self.disconnect()
             return
@@ -342,10 +385,8 @@ class StreamerApp(QMainWindow):
     
         buffer = ""
         while self.stream_lbl.running:
-            if not self.stream_lbl.running:
-                break
-
-            try: # Recieve an incoming control change from server
+            try:
+                # Recieve an incoming control change from server
                 chunk = self.control_conn.recv(1024).decode('utf-8')
                 if not chunk:
                     break
@@ -361,7 +402,12 @@ class StreamerApp(QMainWindow):
                 break
 
     def recv_exact(self,  n: int) -> bytes:
-        """Read exactly n bytes from the socket, or raise if connection closes."""
+        """
+        Read exactly n bytes from the socket, or raise if connection closes
+
+        Args: n (int) - Amount of bytes to process in stream
+        Return: (bytes)
+        """
 
         data = b''
         while len(data) < n:
@@ -371,7 +417,8 @@ class StreamerApp(QMainWindow):
                     raise ConnectionError("Connection closed before all bytes were received.")
                 data += packet
             except (BlockingIOError, socket.timeout):
-                continue
+                pprint("Unable to extract bytes...")
+                return b''
         return data
 
     def handle_control(self, msg: str) -> None:
@@ -481,7 +528,7 @@ if __name__ == "__main__":
 
     # Get the address yaml file -----------
     curr_dir = os.getcwd()
-    addr_pth = os.path.join(curr_dir, "address.yaml")
+    addr_pth = os.path.join(curr_dir, "config", "address.yaml")
     socket_dict = read_yaml(addr_pth)
     win = StreamerApp(socket_dict=socket_dict)
     win.show()

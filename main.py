@@ -10,8 +10,23 @@ import numpy as np
 from pynput.keyboard import Controller as KeyControl, Key
 from pynput.mouse import Controller as MouseControl, Button
 
+# Logging Setup -----
+import logging
+import logging.config
+import yaml
+
+# Load the YAML configuration
+with open('logger.yaml', 'r') as file:
+    config = yaml.safe_load(file)
+logging.config.dictConfig(config)
+
+# Create a logger
+logger = logging.getLogger('server')
+logger.debug('This is a debug message')
+logger.info('This is an info message')
+
 # Local Imports
-from wrapper import pprint
+from common_utils.wrapper import pprint
 
 # Setup pynput config -------
 _keyboard = KeyControl()
@@ -46,16 +61,28 @@ SPECIAL_KEYS = {
     'f5':        Key.f5,
 }
 
-class Actions:
-    """ Store the actions given to easily track """
+class Streams:
+    """ Tracker of the TCP Connections """
 
-    def __init__(self):
-        
-        self.ntype = None
-        self.atype = None
-        self.btype = None
-        self.coords = None
+    def __init__(self) -> None:
+        self.video = None
+        self.control= None
 
+    def send_handshake(self, capture_w: int, capture_h: int, num_display: int) -> None:
+        """Send screen dimensions once at the start"""
+
+        self.video.sendall(struct.pack('>III', capture_w, capture_h, num_display))
+        pprint(f"Sent handshake: {capture_w}x{capture_h} - Total Displays: {num_display}")
+
+    def restart(self) -> None:
+        """Restart the streaming process after a client disconnects"""
+
+        pprint("Client disconnected. Restarting stream...")
+        with contextlib.suppress(Exception):
+            self.video.close()
+            self.control.close()
+        time.sleep(1)
+        start_stream()
 
 class Displays:
     """ Class to manage display information and operations """
@@ -88,109 +115,112 @@ class Displays:
 
         return len(mss.mss().monitors)
 
-def key_action(key_queue:queue.Queue) -> None:
-    """ Process all of the queued key presses coming in """
+    def event(self, action, streams: Streams) -> None:
+        """ Get the action on what display is being viewed """
 
-    while not key_queue.empty():
-        try:
-            # Check if it's a special key first
-            code = key_queue.get()
-            _keyboard.tap(code)
-            print(f"Received key: {code}")
-        except Exception as e:
-            print(f"Failed to send key {code}: {e}")
+        _, idx = action.split("view:")
+        if not idx:
+            pprint("Unable to parse display switch event...")
+            return
 
-def key_event(action_event):
-    """ Action on what keys are pressed on the client side """
+        idx = int(idx.strip())
+        self.change_view(idx)
 
-    key_press = action_event.split("key:")
-    if not key_press:
-        pprint("Unable to parse key press event...")
-        return
+        # Send new resolution back to client
+        w, h = self.get_size()
+        msg = f"res:{w},{h}\n"
+        streams.sendall(msg.encode('utf-8'))
+        pprint(f"Sent new resolution: {w}x{h}")
 
-    # Run through each key press action --------
-    key_queue = queue.Queue()
-    for k in key_press[1:]:
-        key = k.lower().strip()
-        special = SPECIAL_KEYS.get(k.lower())
-        if special: 
-            key = special
-        key_queue.put(key, block=True)
-    key_action(key_queue)
+class MouseActions:
+    """ Store the actions given to easily track """
 
-def display_event(action_event, displays: Displays, control_conn:socket.socket) -> None:
-    """ Get the action on what display is being viewed """
+    def __init__(self) -> None:
+        self.ntype = None
+        self.atype = None
+        self.btype = None
+        self.coords = None
 
-    _, display_idx = action_event.split("view:")
-    if not display_idx:
-        pprint("Unable to parse display switch event...")
-        return
+    def event(self, action, displays: Displays) -> None:
+        """ Create the offset to apply to the select display based on what is sent """
 
-    display_idx = int(display_idx.strip())
-    displays.change_view(display_idx)
+        instruct = action.split(":")
+        for idx, item in enumerate(self.__dict__):
+            if idx > len(instruct)-1:
+                break
 
-    # Send new resolution back to client
-    w, h = displays.get_size()
-    msg = f"res:{w},{h}\n"
-    control_conn.sendall(msg.encode('utf-8'))
-    pprint(f"Sent new resolution: {w}x{h}")
+            event = instruct[idx]
+            setattr(self, item, event)
 
-def click_event(events, displays: Displays) -> None:
-    """ Create the offset to apply to the select display based on what is sent """
+        _button = MOUSE_BUTTONS.get(self.btype)
+        if not _button:
+            print(f"Invalid button type: {self.btype}")
+            return
 
-    act = Actions()
-    instruct = events.split(":")
-    for idx, item in enumerate(act.__dict__):
-        if idx > len(instruct)-1:
-            break
+        if self.atype == "leave":
+            _mouse.release(_button)
+            return
 
-        event = instruct[idx]
-        setattr(act, item, event)
+        x_str, y_str = self.coords.strip().split(",")
+        x, y = int(x_str), int(y_str)
 
-    _button = MOUSE_BUTTONS.get(act.btype)
-    if not _button:
-        print(f"Invalid button type: {act.btype}")
-        return
+        abs_x = displays.monitor["left"] + x
+        abs_y = displays.monitor["top"]  + y
 
-    if act.atype == "release":
+        if self.atype == "click":
+            _mouse.position = (abs_x, abs_y)
+            _mouse.press(_button)
+            return
+        
+        _mouse.position = (abs_x, abs_y)
         _mouse.release(_button)
         return
 
-    x_str, y_str = act.coords.strip().split(",")
-    x, y = int(x_str), int(y_str)
+class KeyActions:
+    """ Store the actions given to easily track """
 
-    abs_x = displays.monitor["left"] + x
-    abs_y = displays.monitor["top"]  + y
+    def action(self, key_queue) -> None:
+        """ Process all of the queued key presses coming in """
 
-    if act.atype == "click":
-        _mouse.position = (abs_x, abs_y)
-        _mouse.press(_button)
-    pprint(f"Action: ({x},{y}) -> abs ({abs_x},{abs_y})")
+        while not key_queue.empty():
+            try:
+                # Check if it's a special key first
+                code = key_queue.get()
+                _keyboard.tap(code)
+                print(f"Received key: {code}")
+            except Exception as e:
+                print(f"Failed to send key {code}: {e}")
 
-def send_handshake(tcp_connection: socket.socket, capture_w: int, capture_h: int, num_display: int) -> None:
-    """Send screen dimensions once at the start"""
+    def event(self, action_event):
+        """ Action on what keys are pressed on the client side """
 
-    tcp_connection.sendall(struct.pack('>III', capture_w, capture_h, num_display))
-    pprint(f"Sent handshake: {capture_w}x{capture_h} - Total Displays: {num_display}")
+        key_press = action_event.split("key:")
+        if not key_press:
+            pprint("Unable to parse key press event...")
+            return
 
-def restart_stream(video_conn: socket.socket, control_conn: socket.socket,  displays: Displays) -> None:
-    """Restart the streaming process after a client disconnects"""
+        # Run through each key press action --------
+        key_queue = queue.Queue()
+        for k in key_press[1:]:
+            key = k.lower().strip()
+            special = SPECIAL_KEYS.get(k.lower())
+            if special: 
+                key = special
+            key_queue.put(key, block=True)
+        self.action(key_queue)
 
-    pprint("Client disconnected. Restarting stream...")
-    with contextlib.suppress(Exception):
-        video_conn.close()
-        control_conn.close()
-    time.sleep(1)
-    start_stream(displays)
-
-def control_handler(control_conn: socket.socket, displays: Displays) -> None:
+def control_handler(streams: Streams, displays: Displays) -> None:
     """Dedicated thread — reads and processes control events independently of video."""
-    
+
+    # Builders --------    
+    key_act = KeyActions()
+    mouse_act = MouseActions()
+
     buffer = ""
     while True:
         try:
-            control_conn.settimeout(1)
-            chunk = control_conn.recv(1024).decode('utf-8')
+            streams.control.settimeout(1)
+            chunk = streams.control.recv(1024).decode('utf-8')
             if not chunk:
                 break
             buffer += chunk
@@ -203,33 +233,35 @@ def control_handler(control_conn: socket.socket, displays: Displays) -> None:
 
                 # Event Actions --------------
                 if msg.startswith("key:"):
-                    key_event(msg)
+                    key_act.event(msg)
                 elif msg.startswith("mouse:"):
-                    click_event(msg, displays)
+                    mouse_act.event(msg, displays)
                 elif msg.startswith("view:"):
-                    display_event(msg, displays, control_conn)
+                    displays.event(msg, streams)
 
         except socket.timeout:
+            pprint("Session Timed Out! Unable to complete action.")
             continue
         except (BrokenPipeError, ConnectionResetError, OSError):
             pprint("Error: closing control thread...")
             break
 
-def start_video(video_conn: socket.socket, control_conn: socket.socket, displays: Displays) -> None:
+def start_video(streams:Streams, displays: Displays) -> None:
     """Start the video streaming loop — no longer touches control socket."""
 
     # Spin up control handler in its own thread
     ctrl_thread = threading.Thread(
         target=control_handler,
-        args=(control_conn, displays),
+        args=(streams, displays),
         daemon=True
     )
     ctrl_thread.start()
 
     with mss.mss() as sct:
+        # Send to the client info about the displays ----
         capture_w, capture_h = displays.get_size()
         num_displays = displays.get_total_display()
-        send_handshake(video_conn, capture_w, capture_h, num_displays)
+        streams.send_handshake(capture_w, capture_h, num_displays)
 
         while True:
             display = sct.grab(displays.monitor)
@@ -242,10 +274,10 @@ def start_video(video_conn: socket.socket, control_conn: socket.socket, displays
                 continue
 
             try: # Send the screenshot frames to streamer
-                video_conn.settimeout(None)
-                video_conn.sendall(struct.pack('>I', len(frame_bytes)) + frame_bytes.tobytes())
+                streams.video.settimeout(None)
+                streams.video.sendall(struct.pack('>I', len(frame_bytes)) + frame_bytes.tobytes())
             except (BrokenPipeError, ConnectionResetError, OSError):
-                restart_stream(video_conn, control_conn, displays)
+                streams.restart()
                 return
 
 def create_tcp_server(host:str='0.0.0.0', name="", port:int=3000) -> socket.socket:
@@ -258,26 +290,25 @@ def create_tcp_server(host:str='0.0.0.0', name="", port:int=3000) -> socket.sock
     pprint(f"TCP {name} server created and listening on {port}")
     return server_socket
 
-def start_stream(displays: Displays, timeout=True) -> int:
+def start_stream() -> int:
     """ Start the streaming server and handle incoming client connections """
+
+    # Builder Objects ------
+    streams = Streams()
+    displays = Displays()
 
     try:
         video_server = create_tcp_server(port=3000, name="Video")
         control_server = create_tcp_server(port=3001, name="Controller")
 
-        if timeout: # Check if server will timeout or not
-            pprint("Server will timeout in an hour...")
-            video_server.settimeout(6000)
-            control_server.settimeout(6000)
-
         # Wait to connect then close ------------
-        video_conn, addr = video_server.accept()
-        control_conn, _ = control_server.accept()
+        streams.video, addr = video_server.accept()
+        streams.control, _ = control_server.accept()
         video_server.close()
         control_server.close()
 
         pprint(f"Client connected from {addr}")
-        start_video(video_conn, control_conn, displays)
+        start_video(streams, displays)
         return 0
     except TimeoutError:
         pprint("No client connected within timeout.")
@@ -289,13 +320,11 @@ def start_stream(displays: Displays, timeout=True) -> int:
         pprint(f"Unexpected error in start_stream: {e}")
         return -1
 
-def main(timeout:bool=True) -> None:
+def main() -> None:
     """ Main entry point for the application """
 
-    displays = Displays()
     video_thread = threading.Thread(
         target=start_stream,
-        args=(displays, timeout),
         daemon=True
     )
     video_thread.start()
@@ -303,5 +332,4 @@ def main(timeout:bool=True) -> None:
     pprint(f"Video thread exited with status: {_status}")
 
 if __name__ == "__main__":
-    timeout = False
-    main(timeout)
+    main()

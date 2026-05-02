@@ -1,4 +1,6 @@
 /__pycache__
+/config
+/logs
 *.pyc
 address.yaml
 test.py
