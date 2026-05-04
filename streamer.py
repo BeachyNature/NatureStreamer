@@ -166,27 +166,35 @@ class VideoLabel(QLabel):
         self._send(f"mouse:{atype}:{btype}:{sx},{sy}\n")
 
     def _send(self, msg: str) -> None:
+        """ Send any instructions to the server """
+
         if not self.control_conn:
             return
+
         try:
             with send_lock:
                 self.control_conn.sendall(msg.encode())
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             pprint("Send failed — connection lost")
 
 # ── Main window ────────────────────────────────────────────────────────────────
 
 class StreamerApp(QMainWindow):
 
+    frame_ready = pyqtSignal(QPixmap)
+
     def __init__(self, socket_dict: dict = {}) -> None:
-        super().__init__()
+        super(StreamerApp, self).__init__()
+
         self.socket_dict  = socket_dict
+
+        self._view_cmds: list[str] = []
         self.video_conn:   socket.socket | None = None
         self.control_conn: socket.socket | None = None
-
-        # Maps view_combo index → command string sent to server ("1", "2", "cam", …)
-        self._view_cmds: list[str] = []
         self._init_ui()
+
+        # Signals --------
+        self.frame_ready.connect(self.stream_lbl.set_frame)
 
     # ── UI construction ────────────────────────────────────────────────────────
 
@@ -195,8 +203,12 @@ class StreamerApp(QMainWindow):
         self.resize(1920, 1080)
         self._build_menu()
 
-        self.ip_combo   = QComboBox(); self.ip_combo.addItems(self.socket_dict); self.ip_combo.setFixedWidth(250)
-        self.port_input = QLineEdit("3000"); self.port_input.setFixedWidth(100)
+        self.ip_combo = QComboBox()
+        self.ip_combo.addItems(self.socket_dict)
+        self.ip_combo.setFixedWidth(250)
+
+        self.port_input = QLineEdit("3000")
+        self.port_input.setFixedWidth(100)
 
         self.view_combo = QComboBox()
         self.view_combo.setFixedWidth(250)
@@ -216,7 +228,13 @@ class StreamerApp(QMainWindow):
         tracker.actionCalled.connect(self.stream_lbl.send_action)
 
         toolbar = QHBoxLayout()
-        for w in (self.ip_combo, self.port_input, self.view_combo, self.info_lbl):
+        tool_widgets = (
+            self.ip_combo,
+            self.port_input,
+            self.view_combo, 
+            self.info_lbl
+        )
+        for w in tool_widgets:
             toolbar.addWidget(w)
         toolbar.addStretch()
 
@@ -232,12 +250,17 @@ class StreamerApp(QMainWindow):
         self.setCentralWidget(container)
 
     def _build_menu(self) -> None:
-        settings_act = QAction("Settings",  self); settings_act.triggered.connect(self._on_settings)
-        keybinds_act = QAction("Key Binds", self); keybinds_act.triggered.connect(self._on_keybinds)
-        file_menu = self.menuBar().addMenu("&File")
+        settings_act = QAction("Settings",  self); 
+        keybinds_act = QAction("Key Binds", self); 
+        settings_act.triggered.connect(self._on_settings)
+        keybinds_act.triggered.connect(self._on_keybinds)
+    
+        file_menu = self.menuBar()
+        file_menu.addMenu("&File")
         file_menu.addAction(settings_act)
         file_menu.addAction(keybinds_act)
-        self.stream_menu = self.menuBar().addMenu("Streams")
+        self.stream_menu = self.menuBar()
+        self.stream_menu.addMenu("Streams")
 
     # ── Menu stubs ─────────────────────────────────────────────────────────────
 
@@ -247,13 +270,14 @@ class StreamerApp(QMainWindow):
     # ── View combo ─────────────────────────────────────────────────────────────
 
     def _populate_views(self, num_displays: int, has_camera: bool) -> None:
-        """Fill the view combo and build the parallel command list."""
+        """ Populate the view to support the proper number of avaliable displays """
+
         self._view_cmds = []
         self.view_combo.clear()
 
-        for i in range(num_displays + 1):
-            label = f"Display {i}"
-            self.view_combo.addItem(label)
+        # Get all of the avaliable displays
+        for i in range(1, num_displays + 1):
+            self.view_combo.addItem(f"Display {i}")
             self._view_cmds.append(str(i))
 
         if has_camera:
@@ -306,8 +330,11 @@ class StreamerApp(QMainWindow):
         threading.Thread(target=self._video_loop,   daemon=True).start()
 
     def _disconnect(self) -> None:
+        """ Actions to close a select video stream """
+
         if not self.stream_lbl.running:
             return
+
         self.stream_lbl.running = False
         self.view_combo.clear()
         self.view_combo.setEnabled(False)
@@ -322,6 +349,8 @@ class StreamerApp(QMainWindow):
     # ── Background threads ─────────────────────────────────────────────────────
 
     def _control_loop(self) -> None:
+        """ Listen for any new information coming from the server """
+
         buf = ""
         while self.stream_lbl.running:
             try:
@@ -337,14 +366,17 @@ class StreamerApp(QMainWindow):
                 break
 
     def _handle_control(self, msg: str) -> None:
+        """ Chnage the handle display when receiving a new resolution """
+
         if msg.startswith("res:"):
             w, h = map(int, msg[4:].split(","))
             self.stream_lbl.capture_w, self.stream_lbl.capture_h = w, h
             pprint(f"Resolution → {w}x{h}")
 
     def _video_loop(self) -> None:
+        """ Get the raw video feed to view a video servers output """
+
         try:
-            # Extended handshake: width, height, num_displays, has_camera
             w, h, num_displays, has_camera = struct.unpack(">IIII", recv_exact(self.video_conn, 16))
 
             self.stream_lbl.capture_w    = w
@@ -353,27 +385,40 @@ class StreamerApp(QMainWindow):
             self._populate_views(num_displays, bool(has_camera))
             pprint(f"Handshake: {w}x{h}, {num_displays} display(s), camera={'yes' if has_camera else 'no'}")
 
+            # Auto-switch to camera if it's the only thing available
+            if has_camera:
+                cam_index = self._view_cmds.index("cam")
+                self.view_combo.setCurrentIndex(cam_index)
+                with send_lock:
+                    self.control_conn.sendall(b"view:cam\n")
+                pprint("Auto-switched to camera")
+
+
+            # Read all the avaliable bytes coming in from the server
             while self.stream_lbl.running:
-                size = struct.unpack(">I", recv_exact(self.video_conn, 4))[0]
-                if size == 0:
-                    continue
-                if size > MAX_FRAME_BYTES:
-                    pprint(f"Frame too large ({size}B) — closing")
-                    break
+                    size = struct.unpack(">I", recv_exact(self.video_conn, 4))[0]
+                    if size == 0:
+                        continue
 
-                frame = cv2.imdecode(
-                    np.frombuffer(recv_exact(self.video_conn, size), np.uint8),
-                    cv2.IMREAD_COLOR,
-                )
-                if frame is None:
-                    continue
+                    if size > MAX_FRAME_BYTES:
+                        pprint(f"Frame too large ({size}B) — skipping")
+                        continue
 
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                h, w, ch = rgb.shape
-                pixmap = QPixmap.fromImage(
-                    QImage(rgb.data, w, h, ch * w, QImage.Format.Format_RGB888)
-                )
-                self.stream_lbl.set_frame(pixmap)
+                    frame = cv2.imdecode(
+                        np.frombuffer(recv_exact(self.video_conn, size), np.uint8),
+                        cv2.IMREAD_COLOR,
+                    )
+                    if frame is None:
+                        continue
+
+                    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    h, w, ch = rgb.shape
+                    image = QImage(
+                        rgb.data, w, h, ch * w,
+                        QImage.Format.Format_RGB888
+                    )
+                    pixmap = QPixmap.fromImage(image)
+                    self.frame_ready.emit(pixmap)
 
         except (ConnectionError, struct.error) as e:
             self.info_lbl.setText(f"Stream error: {e}")
@@ -393,11 +438,15 @@ class StreamerApp(QMainWindow):
         super().closeEvent(event)
 
 # ── Entry point ────────────────────────────────────────────────────────────────
+def run_streamer() -> None:
+    """ Start running the streamer window """
 
-if __name__ == "__main__":
-    app = QApplication(sys.argv)
     addr_path   = os.path.join(os.getcwd(), "config", "address.yaml")
     socket_dict = read_yaml(addr_path)
     win = StreamerApp(socket_dict=socket_dict)
     win.show()
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    run_streamer()
     sys.exit(app.exec())

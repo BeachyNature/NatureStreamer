@@ -1,13 +1,12 @@
-import argparse
-import contextlib
-import queue
-import socket
-import struct
-import threading
-import time
 
 import cv2
 import mss
+import time
+import socket
+import struct
+import argparse
+import threading
+import contextlib
 import numpy as np
 from pynput.keyboard import Controller as KeyControl, Key
 from pynput.mouse import Button, Controller as MouseControl
@@ -20,6 +19,7 @@ with open("logger.yaml") as f:
     logging.config.dictConfig(yaml.safe_load(f))
 logger = logging.getLogger("server")
 
+# Local Imports
 from common_utils.wrapper import pprint
 
 # ── Input devices ──────────────────────────────────────────────────────────────
